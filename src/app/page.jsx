@@ -15,12 +15,25 @@ export default function SingleChannelRecordPage() {
       try {
         const res = await fetch('/api/amp/status');
         const data = await res.json();
-        if (data.success) {
+        if (data && data.channels) {
           setDeckState(data);
         }
       } catch (err) {}
     };
 
+    const initConnection = async () => {
+      try {
+        const res = await fetch('/api/amp/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'hardware', host: '192.168.145.20', port: 3811, channel: 'Vtr1' }),
+        });
+        const data = await res.json();
+        if (data && data.channels) setDeckState(data);
+      } catch (err) {}
+    };
+
+    initConnection();
     fetchStatus();
 
     try {
@@ -48,10 +61,7 @@ export default function SingleChannelRecordPage() {
   }, []);
 
   // Send Command to Backend for Channel 1 (Vtr1 / R1)
-  const toggleRecordCh1 = useCallback(async () => {
-    const isCurrentlyRecording = deckState?.channels?.['Vtr1']?.transportStatus === 'RECORDING';
-    const action = isCurrentlyRecording ? 'stop' : 'record';
-
+  const sendCommand = useCallback(async (action) => {
     try {
       const res = await fetch('/api/amp/command', {
         method: 'POST',
@@ -65,23 +75,40 @@ export default function SingleChannelRecordPage() {
     } catch (err) {
       console.error('Command failed:', err);
     }
-  }, [deckState]);
+  }, []);
 
-  // Keyboard shortcut: Space or R toggles Record
+  const startRecordCh1 = useCallback(() => {
+    sendCommand('record');
+  }, [sendCommand]);
+
+  const stopRecordCh1 = useCallback(() => {
+    sendCommand('stop');
+  }, [sendCommand]);
+
+  // Keyboard shortcuts: R for record, S / Escape for stop, Space to toggle
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
-      if (e.key === ' ' || e.key.toLowerCase() === 'r') {
+      const key = e.key.toLowerCase();
+      if (key === 'r') {
         e.preventDefault();
-        toggleRecordCh1();
+        startRecordCh1();
+      } else if (key === 's' || e.key === 'Escape') {
+        e.preventDefault();
+        stopRecordCh1();
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        const isRec = deckState?.channels?.['Vtr1']?.transportStatus === 'RECORDING';
+        if (isRec) stopRecordCh1();
+        else startRecordCh1();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleRecordCh1]);
+  }, [deckState, startRecordCh1, stopRecordCh1]);
 
   const ch1 = deckState?.channels?.['Vtr1'] || {};
-  const isRecording = ch1.transportStatus === 'RECORDING';
+  const isRecording = ch1.transportStatus === 'RECORDING' || ch1.tally?.recording === true;
   const timecode = ch1.timecode || '00:00:00:00';
   const host = deckState?.host || '192.168.145.20';
   const port = deckState?.port || 3811;
@@ -149,15 +176,15 @@ export default function SingleChannelRecordPage() {
           borderRadius: '12px',
           padding: '16px',
           textAlign: 'center',
-          border: `2px solid ${isRecording ? '#ff3333' : 'rgba(255, 255, 255, 0.1)'}`,
-          boxShadow: isRecording ? '0 0 35px rgba(255, 51, 51, 0.4)' : 'inset 0 2px 10px rgba(0,0,0,0.8)',
+          border: `2px solid ${isRecording ? '#ef4444' : 'rgba(255, 255, 255, 0.1)'}`,
+          boxShadow: isRecording ? '0 0 35px rgba(239, 68, 68, 0.4)' : 'inset 0 2px 10px rgba(0,0,0,0.8)',
           transition: 'all 0.2s ease',
         }}>
           <div style={{
             fontSize: '11px',
             fontWeight: 800,
             letterSpacing: '1px',
-            color: isRecording ? '#ff6666' : '#64748b',
+            color: isRecording ? '#f87171' : '#64748b',
             marginBottom: '4px',
           }}>
             {isRecording ? '● ON AIR RECORDING' : 'IDLE / READY'}
@@ -167,7 +194,7 @@ export default function SingleChannelRecordPage() {
             fontFamily: "'Share Tech Mono', 'JetBrains Mono', monospace",
             fontSize: '44px',
             fontWeight: 700,
-            color: isRecording ? '#ff3333' : '#ffaa00',
+            color: isRecording ? '#ef4444' : '#ffaa00',
             letterSpacing: '3px',
             lineHeight: 1,
             userSelect: 'none',
@@ -180,53 +207,98 @@ export default function SingleChannelRecordPage() {
           </div>
         </div>
 
-        {/* 🔴 ONLY ONE BUTTON: CH1 RECORD 🔴 */}
-        <button
-          type="button"
-          id="btn-ch1-record"
-          onClick={toggleRecordCh1}
-          style={{
-            width: '100%',
-            background: isRecording
-              ? 'linear-gradient(180deg, #991b1b 0%, #450a0a 100%)'
-              : 'linear-gradient(180deg, #dc2626 0%, #7f1d1d 100%)',
-            border: `3px solid ${isRecording ? '#f87171' : '#ef4444'}`,
-            borderRadius: '18px',
-            padding: '48px 24px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '16px',
-            color: '#ffffff',
-            cursor: 'pointer',
-            boxShadow: isRecording
-              ? '0 0 50px rgba(239, 68, 68, 0.75), inset 0 2px 4px rgba(255, 255, 255, 0.4)'
-              : '0 15px 35px rgba(0, 0, 0, 0.6), 0 0 25px rgba(220, 38, 38, 0.4)',
-            transition: 'all 0.15s ease',
-            userSelect: 'none',
-          }}
-        >
-          {isRecording ? (
-            <Square size={54} fill="#ffffff" />
-          ) : (
-            <Circle size={54} fill="#ffffff" />
-          )}
+        {/* 🔴 ACTION BUTTONS: RECORD & STOP RECORD ⏹ */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          gap: '16px',
+          width: '100%',
+        }}>
+          {/* RECORD BUTTON */}
+          <button
+            type="button"
+            id="btn-ch1-record"
+            onClick={startRecordCh1}
+            style={{
+              background: isRecording
+                ? 'linear-gradient(180deg, #dc2626 0%, #991b1b 100%)'
+                : 'linear-gradient(180deg, #ef4444 0%, #b91c1c 100%)',
+              border: `2px solid ${isRecording ? '#fca5a5' : '#ef4444'}`,
+              borderRadius: '16px',
+              padding: '36px 20px',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '12px',
+              color: '#ffffff',
+              cursor: 'pointer',
+              boxShadow: isRecording
+                ? '0 0 35px rgba(239, 68, 68, 0.8), inset 0 2px 4px rgba(255, 255, 255, 0.5)'
+                : '0 10px 25px rgba(0, 0, 0, 0.5), 0 0 20px rgba(239, 68, 68, 0.3)',
+              transition: 'all 0.15s ease',
+              userSelect: 'none',
+              transform: isRecording ? 'scale(1.02)' : 'scale(1)',
+            }}
+          >
+            <Circle size={44} fill="#ffffff" />
+            <div style={{ textAlign: 'center' }}>
+              <div style={{
+                fontSize: '24px',
+                fontWeight: 900,
+                letterSpacing: '1.5px',
+                textShadow: '0 2px 8px rgba(0, 0, 0, 0.6)',
+              }}>
+                RECORD CH1
+              </div>
+              <div style={{ fontSize: '12px', fontWeight: 600, opacity: 0.9, marginTop: '4px' }}>
+                {isRecording ? '● RECORDING ACTIVE' : 'Click to Record (Hotkey: R)'}
+              </div>
+            </div>
+          </button>
 
-          <div style={{ textAlign: 'center' }}>
-            <div style={{
-              fontSize: '32px',
-              fontWeight: 900,
-              letterSpacing: '2px',
-              textShadow: '0 2px 10px rgba(0, 0, 0, 0.5)',
-            }}>
-              {isRecording ? 'STOP CH1' : 'RECORD CH1'}
+          {/* STOP RECORD BUTTON */}
+          <button
+            type="button"
+            id="btn-ch1-stop"
+            onClick={stopRecordCh1}
+            style={{
+              background: isRecording
+                ? 'linear-gradient(180deg, #475569 0%, #1e293b 100%)'
+                : 'linear-gradient(180deg, #1e293b 0%, #0f172a 100%)',
+              border: `2px solid ${isRecording ? '#f87171' : 'rgba(255, 255, 255, 0.12)'}`,
+              borderRadius: '16px',
+              padding: '36px 20px',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '12px',
+              color: isRecording ? '#ffffff' : '#94a3b8',
+              cursor: 'pointer',
+              boxShadow: isRecording
+                ? '0 0 25px rgba(248, 113, 113, 0.35), inset 0 2px 4px rgba(255, 255, 255, 0.2)'
+                : '0 10px 25px rgba(0, 0, 0, 0.5)',
+              transition: 'all 0.15s ease',
+              userSelect: 'none',
+            }}
+          >
+            <Square size={44} fill={isRecording ? '#ffffff' : '#94a3b8'} />
+            <div style={{ textAlign: 'center' }}>
+              <div style={{
+                fontSize: '24px',
+                fontWeight: 900,
+                letterSpacing: '1.5px',
+                textShadow: '0 2px 8px rgba(0, 0, 0, 0.6)',
+              }}>
+                STOP RECORD
+              </div>
+              <div style={{ fontSize: '12px', fontWeight: 600, opacity: 0.9, marginTop: '4px' }}>
+                {isRecording ? 'Click to Stop (Hotkey: S)' : 'Channel Idle (Hotkey: S)'}
+              </div>
             </div>
-            <div style={{ fontSize: '13px', fontWeight: 600, opacity: 0.85, marginTop: '4px' }}>
-              {isRecording ? 'Click to Stop Recording' : 'Click to Start Recording (Hotkey: Space / R)'}
-            </div>
-          </div>
-        </button>
+          </button>
+        </div>
       </div>
     </main>
   );

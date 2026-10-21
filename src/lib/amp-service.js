@@ -9,6 +9,7 @@ import {
   buildCmdsPacket,
   framesToTimecode,
   timecodeToFrames,
+  bcdToTimecode,
   parseTransportStatus,
   AMP_COMMANDS,
   SHUTTLE_SPEEDS,
@@ -187,6 +188,13 @@ class GrassValleyAmpService {
 
     // Start background simulation clock
     this.startSimulationClock();
+
+    // Auto-connect to hardware T3 on startup
+    if (this.mode === 'hardware') {
+      setTimeout(() => {
+        this.connectHardwareSocket();
+      }, 500);
+    }
 
     // Add initial log
     this.logPacket('SYS', 'INITIALIZED', 'Grass Valley T3 iDDR Controller Engine Ready');
@@ -377,22 +385,49 @@ class GrassValleyAmpService {
       this.logPacket('RX', '1111', 'NAK (Command Rejected)');
     } else if (str.length >= 4) {
       this.logPacket('RX', str.trim(), `AMP Telemetry Data (${str.length} bytes)`);
-      // Parse transport bits if 72.20
-      if (str.startsWith('7220') || str.includes('7220')) {
-        const hex = str.replace(/[^0-9a-fA-F]/g, '');
-        if (hex.length >= 6) {
-          const statusByte = parseInt(hex.substr(4, 2), 16);
-          const parsed = parseTransportStatus(statusByte);
-          const ch = this.channels[this.activeChannel];
-          if (ch) {
-            if (parsed.isPlaying) ch.transportStatus = 'PLAYING';
-            else if (parsed.isRecording) ch.transportStatus = 'RECORDING';
-            else if (parsed.isFastForward) ch.transportStatus = 'FF';
-            else if (parsed.isRewind) ch.transportStatus = 'RW';
-            else ch.transportStatus = 'STOPPED';
-            this.notifySubscribers();
-          }
+    }
+
+    const hex = str.replace(/[^0-9a-fA-F]/g, '');
+
+    // Parse transport bits if 72.20 (Status Sense Response: 722003<statusByte>...)
+    const idx7220 = hex.indexOf('7220');
+    if (idx7220 !== -1 && hex.length >= idx7220 + 8) {
+      const statusByte = parseInt(hex.substr(idx7220 + 6, 2), 16);
+      const parsed = parseTransportStatus(statusByte);
+      const ch = this.channels[this.activeChannel];
+      if (ch) {
+        if (parsed.isRecording) {
+          ch.transportStatus = 'RECORDING';
+          ch.tally.recording = true;
+          ch.tally.onAir = false;
+        } else if (parsed.isPlaying) {
+          ch.transportStatus = 'PLAYING';
+          ch.tally.recording = false;
+          ch.tally.onAir = true;
+        } else if (parsed.isFastForward) {
+          ch.transportStatus = 'FF';
+          ch.tally.recording = false;
+        } else if (parsed.isRewind) {
+          ch.transportStatus = 'RW';
+          ch.tally.recording = false;
+        } else {
+          ch.transportStatus = 'STOPPED';
+          ch.tally.recording = false;
+          ch.tally.onAir = false;
         }
+        this.notifySubscribers();
+      }
+    }
+
+    // Parse timecode if 7404 (Timecode Sense Response: 7404<HHMMSSFF>)
+    const idx7404 = hex.indexOf('7404');
+    if (idx7404 !== -1 && hex.length >= idx7404 + 12) {
+      const bcd = hex.substr(idx7404 + 4, 8);
+      const tc = bcdToTimecode(bcd);
+      const ch = this.channels[this.activeChannel];
+      if (ch && tc) {
+        ch.timecode = tc;
+        this.notifySubscribers();
       }
     }
   }
@@ -573,14 +608,14 @@ class GrassValleyAmpService {
 
       case 'stop': {
         const cmdHex = AMP_COMMANDS.STOP;
+        ch.transportStatus = 'STOPPED';
+        ch.speed = 0;
+        ch.shuttleRate = 0;
+        ch.tally.recording = false;
+        ch.tally.onAir = false;
         if (this.mode === 'hardware') {
           this.sendHardwareCommand(cmdHex);
         } else {
-          ch.transportStatus = 'STOPPED';
-          ch.speed = 0;
-          ch.shuttleRate = 0;
-          ch.tally.recording = false;
-          ch.tally.onAir = false;
           this.logPacket('TX', `CMDS0004${cmdHex}`, `STOP command on ${ch.id}`);
           this.logPacket('RX', '1001', 'ACK: Transport stopped');
         }
@@ -589,14 +624,13 @@ class GrassValleyAmpService {
 
       case 'record': {
         const cmdHex = AMP_COMMANDS.RECORD;
+        ch.transportStatus = 'RECORDING';
+        ch.speed = 1.0;
+        ch.tally.recording = true;
+        ch.tally.onAir = false;
         if (this.mode === 'hardware') {
           this.sendHardwareCommand(cmdHex);
         } else {
-          ch.transportStatus = 'RECORDING';
-          ch.speed = 1.0;
-          ch.tally.recording = true;
-          ch.tally.onAir = false;
-
           // If no active clip or recording new clip
           if (!ch.activeClip || ch.activeClip.id !== 'REC_ACTIVE') {
             const clipName = params.clipName || `LIVE_REC_${new Date().toISOString().replace(/[-:T.]/g, '').substr(0, 14)}`;
@@ -801,6 +835,8 @@ class GrassValleyAmpService {
 // Global Singleton to preserve state across Next.js API calls
 if (!globalThis._gvAmpService) {
   globalThis._gvAmpService = new GrassValleyAmpService();
+} else {
+  Object.setPrototypeOf(globalThis._gvAmpService, GrassValleyAmpService.prototype);
 }
 
 export const ampService = globalThis._gvAmpService;
