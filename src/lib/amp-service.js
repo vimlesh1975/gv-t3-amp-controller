@@ -499,11 +499,12 @@ class GrassValleyAmpService {
           }
           changed = true;
         }
-      } else if (head === '7404' && frame.length >= 12) {
-        // Timecode Sense reply: 74 04 <FF SS MM HH>
+      } else if ((head === '7404' || head === '7400') && frame.length >= 12) {
+        // Timecode Sense reply: 74 04/00 <FF SS MM HH>
         const tc = bcdToTimecode(frame.substr(4, 8));
-        if (ch && tc) {
+        if (ch && tc && tc !== '00:00:00:00') {
           ch.timecode = tc;
+          ch.currentFrames = timecodeToFrames(tc, ch.fps || 29.97);
           changed = true;
         }
       } else if (head === '8216' && frame.length >= 12) {
@@ -532,9 +533,10 @@ class GrassValleyAmpService {
   startSimulationClock() {
     if (this.simulationTimer) clearInterval(this.simulationTimer);
     
-    // Tick at 10Hz for smooth UI timecode updates
+    // Tick at 10Hz for smooth UI timecode updates (only active in simulation mode or when disconnected)
     this.simulationTimer = setInterval(() => {
       let changed = false;
+      const isHw = this.mode === 'hardware' && this.isConnected;
 
       for (const key of Object.keys(this.channels)) {
         const ch = this.channels[key];
@@ -542,7 +544,10 @@ class GrassValleyAmpService {
         const frameStep = fps / 10; // ~3 frames per 100ms
 
         if (ch.transportStatus === 'PLAYING') {
-          ch.currentFrames += frameStep * (ch.speed || 1.0);
+          if (!isHw) {
+            ch.currentFrames += frameStep * (ch.speed || 1.0);
+            ch.timecode = framesToTimecode(ch.currentFrames, fps, ch.dropFrame);
+          }
           changed = true;
 
           // Audio meter bounce
@@ -564,11 +569,13 @@ class GrassValleyAmpService {
           }
           ch.timecode = framesToTimecode(ch.currentFrames, fps, ch.dropFrame);
         } else if (ch.transportStatus === 'RECORDING') {
-          ch.currentFrames += frameStep;
+          if (!isHw) {
+            ch.currentFrames += frameStep;
+            ch.timecode = framesToTimecode(ch.currentFrames, fps, ch.dropFrame);
+          }
           changed = true;
           ch.audioL = Math.max(-36, Math.min(-3, -12 + (Math.random() * 6 - 3)));
           ch.audioR = Math.max(-36, Math.min(-3, -12 + (Math.random() * 6 - 3)));
-          ch.timecode = framesToTimecode(ch.currentFrames, fps, ch.dropFrame);
 
           if (ch.activeClip) {
             ch.activeClip.durationFrames = Math.max(ch.activeClip.durationFrames, ch.currentFrames);
@@ -577,14 +584,19 @@ class GrassValleyAmpService {
           }
         } else if (ch.transportStatus === 'FF' || ch.transportStatus === 'SHUTTLE') {
           const rate = ch.shuttleRate || 2.0;
-          ch.currentFrames += frameStep * rate;
+          if (!isHw) {
+            ch.currentFrames += frameStep * rate;
+            ch.timecode = framesToTimecode(ch.currentFrames, fps, ch.dropFrame);
+          }
           changed = true;
           ch.audioL = -48;
           ch.audioR = -48;
-          ch.timecode = framesToTimecode(ch.currentFrames, fps, ch.dropFrame);
         } else if (ch.transportStatus === 'RW') {
           const rate = Math.abs(ch.shuttleRate || 2.0);
-          ch.currentFrames = Math.max(0, ch.currentFrames - frameStep * rate);
+          if (!isHw) {
+            ch.currentFrames = Math.max(0, ch.currentFrames - frameStep * rate);
+            ch.timecode = framesToTimecode(ch.currentFrames, fps, ch.dropFrame);
+          }
           changed = true;
           ch.audioL = -48;
           ch.audioR = -48;

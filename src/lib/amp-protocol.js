@@ -151,7 +151,7 @@ export const AMP_COMMANDS = {
   LOOP_ON: '414201',
   LOOP_OFF: '414200',
   STATUS_SENSE: '612002',
-  TIMECODE_SENSE: '610c01',
+  TIMECODE_SENSE: '610c04',
   ID_LOADED: 'a016', // ID Loaded Request -> reply 82.16 <byteCount:2> <strLen:2> <ascii name>
   LIST_FIRST_ID: 'a2140000',
   LIST_NEXT_ID: 'a115ff',
