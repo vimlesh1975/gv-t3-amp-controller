@@ -10,6 +10,7 @@ import {
   framesToTimecode,
   timecodeToFrames,
   bcdToTimecode,
+  hex2str,
   parseTransportStatus,
   AMP_COMMANDS,
   SHUTTLE_SPEEDS,
@@ -84,11 +85,17 @@ const DEFAULT_CLIPS = [
   },
 ];
 
+const CHANNEL_MAP = {
+  Vtr1: 'vtr_r1',
+  Vtr2: 'vtr_r2',
+  Vtr3: 'vtr_r3',
+};
+
 class GrassValleyAmpService {
   constructor() {
     this.mode = 'hardware'; // 'hardware' | 'simulator'
-    this.host = '192.168.145.20';
-    this.port = 3811;
+    this.host = process.env.T3_HOST || process.env.NEXT_PUBLIC_T3_HOST || '192.168.145.20';
+    this.port = parseInt(process.env.T3_PORT || process.env.NEXT_PUBLIC_T3_PORT || '3811', 10);
     this.activeChannel = 'Vtr1'; // 'Vtr1' (R1), 'Vtr2' (P1), 'Vtr3' (P2)
     this.isConnected = false;
     this.connectionState = 'connecting'; // 'connected' | 'connecting' | 'disconnected' | 'error'
@@ -182,6 +189,8 @@ class GrassValleyAmpService {
     this.clips = [...DEFAULT_CLIPS];
     this.packetLogs = [];
     this.subscribers = new Set();
+    this.sockets = {};
+    this.channelHeartbeats = {};
     this.socket = null;
     this.heartbeatTimer = null;
     this.simulationTimer = null;
@@ -276,160 +285,247 @@ class GrassValleyAmpService {
     return this.connectHardwareSocket();
   }
 
-  // Connect TCP socket to real Grass Valley T3
+  // Connect TCP sockets for all active channels (Vtr1, Vtr2, Vtr3) to real Grass Valley T3
   async connectHardwareSocket() {
-    return new Promise((resolve) => {
-      if (this.socket) {
-        try {
-          this.socket.destroy();
-        } catch (e) {}
-        this.socket = null;
-      }
+    if (!this.sockets) this.sockets = {};
+    if (!this.channelHeartbeats) this.channelHeartbeats = {};
+    this.connectChannelSocket('Vtr1');
+    this.connectChannelSocket('Vtr2');
+    this.connectChannelSocket('Vtr3');
+    return { success: true, mode: 'hardware' };
+  }
 
-      this.logPacket('SYS', 'TCP_CONNECT', `Opening TCP socket to ${this.host}:${this.port}...`);
+  connectChannelSocket(channelId) {
+    if (!this.sockets) this.sockets = {};
+    if (!this.channelHeartbeats) this.channelHeartbeats = {};
+    const hwName = CHANNEL_MAP[channelId] || channelId;
+    if (this.sockets[channelId]) {
+      const old = this.sockets[channelId];
+      // Detach listeners first so the old socket's 'close' cannot clobber the new one
+      old.removeAllListeners('close');
+      old.removeAllListeners('data');
+      try {
+        old.destroy();
+      } catch (e) {}
+      delete this.sockets[channelId];
+    }
 
-      const socket = new net.Socket();
+    this.logPacket('SYS', `TCP_CONNECT_${channelId}`, `Opening socket for ${channelId} (${hwName}) on ${this.host}:${this.port}...`);
+
+    const socket = new net.Socket();
+    this.sockets[channelId] = socket;
+    if (channelId === this.activeChannel || !this.socket) {
       this.socket = socket;
-      socket.setTimeout(5000);
+    }
+    socket.setKeepAlive(true, 5000);
 
-      socket.connect(this.port, this.host, () => {
-        this.isConnected = true;
-        this.connectionState = 'connected';
-        this.lastError = null;
-        this.logPacket('SYS', 'TCP_CONNECTED', `Connected to Grass Valley T3 at ${this.host}:${this.port}`);
+    socket.connect(this.port, this.host, () => {
+      this.isConnected = true;
+      this.connectionState = 'connected';
+      this.lastError = null;
+      this.logPacket('SYS', `TCP_CONNECTED_${channelId}`, `Connected to T3 on ${channelId} (${hwName})`);
 
-        // Send CRAT connection packet for the target channel
-        const crat = buildCratPacket(this.activeChannel);
-        this.logPacket('TX', crat.trim(), `CRAT Request: Connect channel ${this.activeChannel}`);
-        socket.write(crat);
+      // Bind to T3 channel using CRAT
+      const crat = buildCratPacket(hwName);
+      this.logPacket('TX', crat.trim(), `CRAT [${channelId}]: Connect to ${hwName}`);
+      socket.write(crat);
 
-        // Start periodic status sense
-        this.startHardwareHeartbeat();
-        this.notifySubscribers();
-        resolve({ success: true, mode: 'hardware' });
-      });
+      // Start periodic status, timecode and clip-name polling for this channel
+      this.startChannelHeartbeat(channelId);
+      this.notifySubscribers();
+    });
 
-      socket.on('data', (data) => {
-        const str = data.toString('utf8');
-        this.handleHardwareResponse(str, data);
-      });
+    socket.on('data', (data) => {
+      this.handleHardwareResponse(channelId, data.toString('utf8'), data);
+    });
 
-      socket.on('timeout', () => {
-        this.lastError = 'Connection timed out';
-        this.logPacket('SYS', 'ERR_TIMEOUT', `Connection timeout to ${this.host}:${this.port}`);
-        socket.destroy();
-      });
+    socket.on('error', (err) => {
+      this.lastError = err.message;
+      this.logPacket('SYS', 'ERR_SOCKET', `Socket Error [${channelId}]: ${err.message}`);
+      this.notifySubscribers();
+    });
 
-      socket.on('error', (err) => {
-        this.lastError = err.message;
-        this.isConnected = false;
-        this.connectionState = 'error';
-        this.logPacket('SYS', 'ERR_SOCKET', `Socket Error: ${err.message}`);
-        this.notifySubscribers();
-        resolve({ success: false, error: err.message });
-      });
+    socket.on('close', () => {
+      // Ignore close events from sockets that have already been replaced
+      if (this.sockets[channelId] !== socket) return;
 
-      socket.on('close', () => {
+      this.stopChannelHeartbeat(channelId);
+      delete this.sockets[channelId];
+      if (this.socket === socket) {
+        this.socket = Object.values(this.sockets)[0] || null;
+      }
+      if (Object.keys(this.sockets).length === 0) {
         this.isConnected = false;
         this.connectionState = 'disconnected';
-        this.logPacket('SYS', 'TCP_CLOSED', `Socket connection closed.`);
-        if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-        this.notifySubscribers();
+      }
+      this.logPacket('SYS', `TCP_CLOSED_${channelId}`, `Socket connection closed on ${channelId}`);
+      this.notifySubscribers();
 
-        // Auto-reconnect retry every 2.5 seconds if configured for hardware mode
-        if (this.mode === 'hardware' && !this.reconnectTimer) {
-          this.reconnectTimer = setTimeout(() => {
-            this.reconnectTimer = null;
-            if (this.mode === 'hardware' && !this.isConnected) {
-              this.logPacket('SYS', 'RECONNECT', `Retrying connection to ${this.host}:${this.port}...`);
-              this.connectHardwareSocket();
-            }
-          }, 2500);
-        }
-      });
+      // Auto-reconnect retry every 2.5s
+      if (this.mode === 'hardware') {
+        setTimeout(() => {
+          if (this.mode === 'hardware' && (!this.sockets[channelId] || this.sockets[channelId].destroyed)) {
+            this.connectChannelSocket(channelId);
+          }
+        }, 2500);
+      }
     });
   }
 
-  startHardwareHeartbeat() {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.heartbeatTimer = setInterval(() => {
-      if (this.socket && this.isConnected) {
-        // Poll transport status (612002) and timecode (610C01)
-        this.sendHardwareCommand(AMP_COMMANDS.STATUS_SENSE);
+  startChannelHeartbeat(channelId) {
+    this.stopChannelHeartbeat(channelId);
+    this.channelHeartbeats[channelId] = setInterval(() => {
+      const sock = this.sockets[channelId];
+      if (sock && !sock.destroyed) {
+        this.sendHardwareCommand(AMP_COMMANDS.STATUS_SENSE, channelId);
         setTimeout(() => {
-          if (this.socket && this.isConnected) {
-            this.sendHardwareCommand(AMP_COMMANDS.TIMECODE_SENSE);
+          if (sock && !sock.destroyed) {
+            this.sendHardwareCommand(AMP_COMMANDS.TIMECODE_SENSE, channelId);
           }
-        }, 100);
+        }, 120);
+        setTimeout(() => {
+          if (sock && !sock.destroyed) {
+            this.sendHardwareCommand(AMP_COMMANDS.ID_LOADED, channelId);
+          }
+        }, 240);
       }
     }, 500);
   }
 
-  sendHardwareCommand(cmdHex) {
-    if (!this.socket || !this.isConnected) return false;
+  stopChannelHeartbeat(channelId) {
+    if (this.channelHeartbeats[channelId]) {
+      clearInterval(this.channelHeartbeats[channelId]);
+      delete this.channelHeartbeats[channelId];
+    }
+  }
+
+  startHardwareHeartbeat() {
+    this.startChannelHeartbeat('Vtr1');
+    this.startChannelHeartbeat('Vtr2');
+    this.startChannelHeartbeat('Vtr3');
+  }
+
+  sendHardwareCommand(cmdHex, channelId) {
+    if (!this.sockets) this.sockets = {};
+    const target = channelId || this.activeChannel || 'Vtr1';
+    const sock = this.sockets[target];
+    if (!sock || sock.destroyed) {
+      this.logPacket('SYS', 'ERR_NO_SOCKET', `Channel ${target} socket not ready. Reconnecting...`);
+      this.connectChannelSocket(target);
+      return false;
+    }
     try {
       const packet = buildCmdsPacket(cmdHex);
-      this.logPacket('TX', packet.trim(), `AMP Command: ${cmdHex}`);
-      this.socket.write(packet);
+      this.logPacket('TX', packet.trim(), `AMP [${target}]: ${cmdHex}`);
+      sock.write(packet);
       return true;
     } catch (err) {
-      this.logPacket('SYS', 'ERR_WRITE', `Socket write error: ${err.message}`);
+      this.logPacket('SYS', 'ERR_WRITE', `Socket write error [${target}]: ${err.message}`);
       return false;
     }
   }
 
-  handleHardwareResponse(str, buffer) {
-    if (str.includes('1001')) {
-      this.logPacket('RX', '1001', 'ACK (Command Accepted)');
-    } else if (str.includes('1111')) {
-      this.logPacket('RX', '1111', 'NAK (Command Rejected)');
-    } else if (str.length >= 4) {
-      this.logPacket('RX', str.trim(), `AMP Telemetry Data (${str.length} bytes)`);
+  /**
+   * Split a (possibly coalesced) T3 reply into individual AMP frames.
+   * Sony/AMP framing: low nibble of CMD1 = data byte count.
+   * AMP variable-length replies (CMD1 = 0x8X) carry a 2-byte byte-count after CMD2.
+   */
+  splitAmpFrames(hex) {
+    const frames = [];
+    let i = 0;
+    while (i + 4 <= hex.length) {
+      const head = hex.substr(i, 4).toLowerCase();
+      // T3 non-standard error reply
+      if (head === '2222' || head === '1111') {
+        frames.push(head);
+        i += 4;
+        continue;
+      }
+      const cmd1 = parseInt(hex.substr(i, 2), 16);
+      let len;
+      if ((cmd1 & 0xf0) === 0x80) {
+        if (i + 8 > hex.length) break;
+        const byteCount = parseInt(hex.substr(i + 4, 4), 16);
+        len = 8 + byteCount * 2;
+      } else {
+        len = 4 + (cmd1 & 0x0f) * 2;
+      }
+      if (i + len > hex.length) {
+        frames.push(hex.substr(i));
+        break;
+      }
+      frames.push(hex.substr(i, len));
+      i += len;
     }
+    return frames;
+  }
 
+  handleHardwareResponse(channelId, str, buffer) {
+    const chId = channelId || this.activeChannel;
+    const ch = this.channels[chId];
     const hex = str.replace(/[^0-9a-fA-F]/g, '');
+    let changed = false;
 
-    // Parse transport bits if 72.20 (Status Sense Response: 722003<statusByte>...)
-    const idx7220 = hex.indexOf('7220');
-    if (idx7220 !== -1 && hex.length >= idx7220 + 8) {
-      const statusByte = parseInt(hex.substr(idx7220 + 6, 2), 16);
-      const parsed = parseTransportStatus(statusByte);
-      const ch = this.channels[this.activeChannel];
-      if (ch) {
-        if (parsed.isRecording) {
-          ch.transportStatus = 'RECORDING';
-          ch.tally.recording = true;
-          ch.tally.onAir = false;
-        } else if (parsed.isPlaying) {
-          ch.transportStatus = 'PLAYING';
-          ch.tally.recording = false;
-          ch.tally.onAir = true;
-        } else if (parsed.isFastForward) {
-          ch.transportStatus = 'FF';
-          ch.tally.recording = false;
-        } else if (parsed.isRewind) {
-          ch.transportStatus = 'RW';
-          ch.tally.recording = false;
-        } else {
-          ch.transportStatus = 'STOPPED';
-          ch.tally.recording = false;
-          ch.tally.onAir = false;
+    for (const frame of this.splitAmpFrames(hex)) {
+      const head = frame.substr(0, 4).toLowerCase();
+
+      if (head === '1001') {
+        this.logPacket('RX', '1001', `ACK [${chId}] (Command Accepted)`);
+      } else if (head === '1111' || head === '2222' || head === '1112') {
+        this.logPacket('RX', frame, `NAK [${chId}] (Command Rejected)`);
+      } else if (head === '7220' && frame.length >= 8) {
+        // Status Sense reply: 72 20 <byte0> <byte1> — transport bits in byte1
+        const statusByte = parseInt(frame.substr(6, 2), 16);
+        const parsed = parseTransportStatus(statusByte);
+        if (ch) {
+          if (parsed.isRecording) {
+            ch.transportStatus = 'RECORDING';
+            ch.tally.recording = true;
+            ch.tally.onAir = false;
+          } else if (parsed.isPlaying) {
+            ch.transportStatus = 'PLAYING';
+            ch.tally.recording = false;
+            ch.tally.onAir = true;
+          } else if (parsed.isFastForward) {
+            ch.transportStatus = 'FF';
+            ch.tally.recording = false;
+          } else if (parsed.isRewind) {
+            ch.transportStatus = 'RW';
+            ch.tally.recording = false;
+          } else {
+            ch.transportStatus = 'STOPPED';
+            ch.tally.recording = false;
+            ch.tally.onAir = false;
+          }
+          changed = true;
         }
-        this.notifySubscribers();
+      } else if (head === '7404' && frame.length >= 12) {
+        // Timecode Sense reply: 74 04 <FF SS MM HH>
+        const tc = bcdToTimecode(frame.substr(4, 8));
+        if (ch && tc) {
+          ch.timecode = tc;
+          changed = true;
+        }
+      } else if (head === '8216' && frame.length >= 12) {
+        // ID Loaded reply: 82 16 <byteCount:2> <strLen:2> <ascii name>
+        const strLen = parseInt(frame.substr(8, 4), 16);
+        const name = hex2str(frame.substr(12, strLen * 2));
+        if (ch && name) {
+          if (!ch.activeClip) ch.activeClip = {};
+          if (ch.activeClip.name !== name) {
+            this.logPacket('RX', frame, `ID Loaded [${chId}]: ${name}`);
+          }
+          ch.activeClip.name = name;
+          ch.activeClip.id = name;
+          ch.clipName = name;
+          changed = true;
+        }
+      } else {
+        this.logPacket('RX', frame, `AMP Telemetry [${chId}]`);
       }
     }
 
-    // Parse timecode if 7404 (Timecode Sense Response: 7404<HHMMSSFF>)
-    const idx7404 = hex.indexOf('7404');
-    if (idx7404 !== -1 && hex.length >= idx7404 + 12) {
-      const bcd = hex.substr(idx7404 + 4, 8);
-      const tc = bcdToTimecode(bcd);
-      const ch = this.channels[this.activeChannel];
-      if (ch && tc) {
-        ch.timecode = tc;
-        this.notifySubscribers();
-      }
-    }
+    if (changed) this.notifySubscribers();
   }
 
   // High-Fidelity Simulation Clock
@@ -511,15 +607,18 @@ class GrassValleyAmpService {
 
   // Execute Transport & Playout Commands
   executeCommand(action, params = {}) {
-    const ch = this.channels[this.activeChannel];
-    if (!ch) return { success: false, error: 'Channel not found' };
+    const targetChannel = params.channel || this.activeChannel;
+    const ch = this.channels[targetChannel];
+    if (!ch) return { success: false, error: `Channel ${targetChannel} not found` };
 
     switch (action) {
       case 'record_all': {
         const cmdHex = AMP_COMMANDS.RECORD;
         this.logPacket('SYS', 'REC_ALL', 'RECORD ALL issued across all recording channels');
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          for (const chId of ['Vtr1', 'Vtr2', 'Vtr3']) {
+            this.sendHardwareCommand(cmdHex, chId);
+          }
         }
         const timestamp = new Date().toISOString().replace(/[-:T.]/g, '').substr(0, 14);
         for (const k of Object.keys(this.channels)) {
@@ -556,7 +655,9 @@ class GrassValleyAmpService {
         const cmdHex = AMP_COMMANDS.STOP;
         this.logPacket('SYS', 'STOP_ALL', 'STOP ALL issued across all channels');
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          for (const chId of ['Vtr1', 'Vtr2', 'Vtr3']) {
+            this.sendHardwareCommand(cmdHex, chId);
+          }
         }
         for (const k of Object.keys(this.channels)) {
           const c = this.channels[k];
@@ -575,7 +676,9 @@ class GrassValleyAmpService {
         const cmdHex = AMP_COMMANDS.PLAY;
         this.logPacket('SYS', 'PLAY_ALL', 'PLAY ALL issued across all playout channels');
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          for (const chId of ['Vtr1', 'Vtr2', 'Vtr3']) {
+            this.sendHardwareCommand(cmdHex, chId);
+          }
         }
         for (const k of Object.keys(this.channels)) {
           const c = this.channels[k];
@@ -593,7 +696,7 @@ class GrassValleyAmpService {
       case 'play': {
         const cmdHex = AMP_COMMANDS.PLAY;
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          this.sendHardwareCommand(cmdHex, targetChannel);
         } else {
           ch.transportStatus = 'PLAYING';
           ch.speed = 1.0;
@@ -614,7 +717,7 @@ class GrassValleyAmpService {
         ch.tally.recording = false;
         ch.tally.onAir = false;
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          this.sendHardwareCommand(cmdHex, targetChannel);
         } else {
           this.logPacket('TX', `CMDS0004${cmdHex}`, `STOP command on ${ch.id}`);
           this.logPacket('RX', '1001', 'ACK: Transport stopped');
@@ -629,7 +732,7 @@ class GrassValleyAmpService {
         ch.tally.recording = true;
         ch.tally.onAir = false;
         if (this.mode === 'hardware') {
-          this.sendHardwareCommand(cmdHex);
+          this.sendHardwareCommand(cmdHex, targetChannel);
         } else {
           // If no active clip or recording new clip
           if (!ch.activeClip || ch.activeClip.id !== 'REC_ACTIVE') {
@@ -818,13 +921,6 @@ class GrassValleyAmpService {
     if (this.channels[channelId]) {
       this.activeChannel = channelId;
       this.logPacket('SYS', 'CH_SELECT', `Active control switched to ${channelId} (${this.channels[channelId].label})`);
-
-      if (this.mode === 'hardware' && this.isConnected && this.socket) {
-        const crat = buildCratPacket(channelId);
-        this.logPacket('TX', crat.trim(), `CRAT Request: Rebind channel to ${channelId}`);
-        this.socket.write(crat);
-      }
-
       this.notifySubscribers();
       return true;
     }
@@ -837,6 +933,11 @@ if (!globalThis._gvAmpService) {
   globalThis._gvAmpService = new GrassValleyAmpService();
 } else {
   Object.setPrototypeOf(globalThis._gvAmpService, GrassValleyAmpService.prototype);
+  if (!globalThis._gvAmpService.sockets) globalThis._gvAmpService.sockets = {};
+  if (!globalThis._gvAmpService.channelHeartbeats) globalThis._gvAmpService.channelHeartbeats = {};
+  if (globalThis._gvAmpService.mode === 'hardware') {
+    globalThis._gvAmpService.connectHardwareSocket();
+  }
 }
 
 export const ampService = globalThis._gvAmpService;

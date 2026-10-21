@@ -9,17 +9,14 @@ export async function POST(request) {
     const body = await request.json();
     const { action, params, channel } = body;
 
-    // Optional channel switch
-    if (channel && channel !== ampService.activeChannel) {
-      ampService.setActiveChannel(channel);
-    }
-
     if (action === 'set_channel') {
-      const switched = ampService.setActiveChannel(params?.channel || channel);
+      const targetCh = params?.channel || channel;
+      const switched = ampService.setActiveChannel(targetCh);
       return NextResponse.json({ success: switched, state: ampService.getStateSnapshot() });
     }
 
-    const result = ampService.executeCommand(action, params);
+    const cmdParams = { ...(params || {}), channel: channel || params?.channel };
+    const result = ampService.executeCommand(action, cmdParams);
     const snapshot = ampService.getStateSnapshot();
 
     return NextResponse.json({
@@ -28,7 +25,7 @@ export async function POST(request) {
       state: snapshot,
     });
   } catch (error) {
-    console.error('API /api/amp/command error:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    console.error('API /api/amp/command error:', error.stack || error);
+    return NextResponse.json({ success: false, error: error.stack || error.message }, { status: 500 });
   }
 }
