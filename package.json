@@ -4,9 +4,9 @@
   "private": true,
   "description": "Professional Grass Valley T3 iDDR Broadcast Controller (AMP Protocol) built with Next.js",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p 23000",
     "build": "next build",
-    "start": "next start"
+    "start": "next start -p 23000"
   },
   "dependencies": {
     "next": "^14.2.15",
