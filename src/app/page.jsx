@@ -66,6 +66,16 @@ export default function GrassValley3RecorderController() {
     }
   }, []);
 
+  const handleConnectRetry = useCallback(async () => {
+    try {
+      await fetch('/api/amp/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'hardware', host: '192.168.145.20', port: 3811, channel: 'Vtr1' }),
+      });
+    } catch (e) {}
+  }, []);
+
   // Keyboard shortcuts: Space / K = STOP ALL, Shift+R / R = RECORD ALL
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -147,28 +157,85 @@ export default function GrassValley3RecorderController() {
             </div>
           </div>
 
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            background: 'rgba(0, 0, 0, 0.4)',
-            border: `1px solid ${isConnected ? 'rgba(34, 197, 94, 0.4)' : 'rgba(255, 68, 68, 0.4)'}`,
-            padding: '6px 14px',
-            borderRadius: '20px',
-            fontSize: '12px',
-            fontWeight: 700,
-            color: isConnected ? '#4ade80' : '#f87171',
-          }}>
-            <span style={{
-              width: '8px',
-              height: '8px',
-              borderRadius: '50%',
-              backgroundColor: isConnected ? '#22c55e' : '#ef4444',
-              boxShadow: `0 0 10px ${isConnected ? '#22c55e' : '#ef4444'}`,
-            }} />
-            <span>{host}:{port}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              background: 'rgba(0, 0, 0, 0.4)',
+              border: `1px solid ${isConnected ? 'rgba(34, 197, 94, 0.4)' : 'rgba(255, 68, 68, 0.4)'}`,
+              padding: '6px 14px',
+              borderRadius: '20px',
+              fontSize: '12px',
+              fontWeight: 700,
+              color: isConnected ? '#4ade80' : '#f87171',
+            }}>
+              <span style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: isConnected ? '#22c55e' : '#ef4444',
+                boxShadow: `0 0 10px ${isConnected ? '#22c55e' : '#ef4444'}`,
+              }} />
+              <span>{isConnected ? `CONNECTED: ${host}:${port}` : `DISCONNECTED: ${host}:${port}`}</span>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleConnectRetry}
+              style={{
+                background: '#1a2233',
+                border: '1px solid rgba(255, 255, 255, 0.15)',
+                color: '#cbd5e1',
+                padding: '6px 12px',
+                borderRadius: '6px',
+                fontSize: '11px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Retry
+            </button>
           </div>
         </header>
+
+        {/* Action Needed Banner when disconnected */}
+        {!isConnected && (
+          <div style={{
+            background: 'rgba(255, 179, 0, 0.08)',
+            border: '1px solid rgba(255, 179, 0, 0.3)',
+            borderRadius: '8px',
+            padding: '12px 18px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            fontSize: '12px',
+            color: '#fef08a',
+            gap: '12px',
+          }}>
+            <div>
+              ⚠️ <strong>Action Needed on T3 Unit:</strong> The T3 is connected on port 3811, but the channel is in <strong>Local</strong> mode.
+              On your T3 screen, click the <strong>[ Local / Remote ]</strong> button on each recorder channel so it switches to <strong>[ Remote ]</strong>.
+            </div>
+            <button
+              type="button"
+              onClick={handleConnectRetry}
+              style={{
+                background: '#f59e0b',
+                border: 'none',
+                borderRadius: '5px',
+                color: '#000',
+                fontWeight: 800,
+                padding: '6px 14px',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+                fontSize: '11px',
+              }}
+            >
+              Connect Now
+            </button>
+          </div>
+        )}
 
         {/* 🔴 ONLY TWO BUTTONS: RECORD ALL & STOP ALL ⏹️ */}
         <section aria-label="Master Transport" style={{

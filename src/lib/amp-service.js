@@ -328,7 +328,7 @@ class GrassValleyAmpService {
         if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
         this.notifySubscribers();
 
-        // Auto-reconnect retry every 6 seconds if configured for hardware mode
+        // Auto-reconnect retry every 2.5 seconds if configured for hardware mode
         if (this.mode === 'hardware' && !this.reconnectTimer) {
           this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
@@ -336,7 +336,7 @@ class GrassValleyAmpService {
               this.logPacket('SYS', 'RECONNECT', `Retrying connection to ${this.host}:${this.port}...`);
               this.connectHardwareSocket();
             }
-          }, 6000);
+          }, 2500);
         }
       });
     });
