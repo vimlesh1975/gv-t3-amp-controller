@@ -221,7 +221,17 @@ class GrassValleyAmpService {
     if (this.packetLogs.length > 80) {
       this.packetLogs.pop();
     }
-    this.notifySubscribers();
+    // Only schedule subscriber notification if not already pending
+    this.scheduleNotify();
+  }
+
+  scheduleNotify() {
+    if (this._notifyScheduled) return;
+    this._notifyScheduled = true;
+    setTimeout(() => {
+      this._notifyScheduled = false;
+      this.notifySubscribers();
+    }, 40);
   }
 
   subscribe(callback) {
@@ -230,6 +240,7 @@ class GrassValleyAmpService {
   }
 
   notifySubscribers() {
+    this._notifyScheduled = false;
     const payload = this.getStateSnapshot();
     for (const callback of this.subscribers) {
       try {
@@ -257,10 +268,10 @@ class GrassValleyAmpService {
   }
 
   // Set Connection Mode: 'simulator' or 'hardware'
-  async configureConnection({ mode = 'hardware', host = '192.168.145.20', port = 3811, channel = 'Vtr1' }) {
+  async configureConnection({ mode = 'hardware', host, port, channel = 'Vtr1' }) {
     this.activeChannel = channel;
-    this.host = host;
-    this.port = parseInt(port, 10) || 3811;
+    this.host = host || process.env.T3_HOST || process.env.NEXT_PUBLIC_T3_HOST || this.host || '192.168.145.20';
+    this.port = parseInt(port || process.env.T3_PORT || process.env.NEXT_PUBLIC_T3_PORT || this.port || '3811', 10);
 
     if (mode === 'simulator') {
       if (this.socket) {

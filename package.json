@@ -6,7 +6,12 @@
   "scripts": {
     "dev": "next dev -p 23000",
     "build": "next build",
-    "start": "next start -p 23000"
+    "start": "next start -p 23000",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop t3-controller",
+    "pm2:restart": "pm2 restart t3-controller",
+    "pm2:logs": "pm2 logs t3-controller",
+    "pm2:status": "pm2 status"
   },
   "dependencies": {
     "next": "^14.2.15",

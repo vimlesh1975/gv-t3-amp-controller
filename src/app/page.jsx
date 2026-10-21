@@ -63,8 +63,44 @@ export default function CompactTripleChannelRecordPage() {
     };
   }, []);
 
-  // Send Command to Backend for specific channel or all
+  // Send Command to Backend for specific channel or all with instant optimistic UI feedback
   const sendCommand = useCallback(async (action, channel) => {
+    // Instant optimistic update so UI is immediately responsive
+    if (channel) {
+      setDeckState((prev) => {
+        if (!prev?.channels?.[channel]) return prev;
+        const updatedCh = { ...prev.channels[channel] };
+        if (action === 'record') {
+          updatedCh.transportStatus = 'RECORDING';
+          updatedCh.tally = { ...updatedCh.tally, recording: true, onAir: false };
+        } else if (action === 'stop') {
+          updatedCh.transportStatus = 'STOPPED';
+          updatedCh.tally = { ...updatedCh.tally, recording: false, onAir: false };
+        }
+        return {
+          ...prev,
+          channels: {
+            ...prev.channels,
+            [channel]: updatedCh,
+          },
+        };
+      });
+    } else if (action === 'record_all' || action === 'stop_all') {
+      const isRec = action === 'record_all';
+      setDeckState((prev) => {
+        if (!prev?.channels) return prev;
+        const newChannels = {};
+        for (const [k, v] of Object.entries(prev.channels)) {
+          newChannels[k] = {
+            ...v,
+            transportStatus: isRec ? 'RECORDING' : 'STOPPED',
+            tally: { ...v.tally, recording: isRec, onAir: false },
+          };
+        }
+        return { ...prev, channels: newChannels };
+      });
+    }
+
     try {
       const res = await fetch('/api/amp/command', {
         method: 'POST',
